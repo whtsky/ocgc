@@ -4,6 +4,28 @@ Analyze and reclaim storage used by [OpenCode](https://github.com/anomalyco/open
 
 OpenCode stores sessions in a SQLite file that grows without limit and has [no built-in cleanup](https://github.com/anomalyco/opencode/issues/4980). It also writes session diffs and git snapshots to disk. `ocgc` shows where the space goes and reclaims it.
 
+## Screenshots
+
+`ocgc status`
+
+![status](screenshots/status.png)
+
+`ocgc analyze`
+
+![analyze](screenshots/analyze.png)
+
+`ocgc purge --clean-orphans --clean-snapshots --older-than 14d --dry-run`
+
+![purge](screenshots/purge.png)
+
+## Quick start
+
+Copy this to your AI agent:
+
+```
+Read https://raw.githubusercontent.com/whtsky/ocgc/refs/heads/main/README.md and help me garbage collect OpenCode storage.
+```
+
 ## Install
 
 ```bash
