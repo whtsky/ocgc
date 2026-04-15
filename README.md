@@ -1,4 +1,4 @@
-# ocgc
+# ocgc: OpenCode Garbage Collector
 
 Analyze and reclaim storage used by [OpenCode](https://github.com/anomalyco/opencode) sessions, diffs, and snapshots.
 
