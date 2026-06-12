@@ -16,6 +16,7 @@ from ocgc.display import (
     format_bytes,
     print_purge_summary,
     print_reasoning_summary,
+    print_tools_summary,
     print_vacuum_result,
     warn_if_opencode_running,
     warn_opencode_running,
@@ -49,6 +50,7 @@ def run_purge(
     subagents: bool,
     larger_than: str | None,
     strip_reasoning: bool,
+    strip_tools: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     dry_run: bool,
@@ -60,45 +62,76 @@ def run_purge(
             return
 
     has_filter = older_than or subagents or larger_than or session_ids or keep_latest is not None
-    if not has_filter and not strip_reasoning:
+    if not has_filter and not strip_reasoning and not strip_tools:
         console.print("[red]Error:[/] At least one purge flag is required.")
-        console.print("Use --older-than, --subagents, --larger-than, --session, --keep-latest, or --strip-reasoning")
+        console.print("Use --older-than, --subagents, --larger-than, --session, --keep-latest, --strip-reasoning, or --strip-tools")
         raise SystemExit(1)
 
     older_than_ms = parse_duration(older_than) if older_than else None
     larger_than_bytes = parse_size(larger_than) if larger_than else None
     now_ms = int(time.time() * 1000)
 
-    if strip_reasoning and not has_filter:
-        # Strip reasoning from ALL sessions
-        try:
-            conn = db.connect(readonly=True)
-        except FileNotFoundError as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(1) from None
-        try:
-            summary = db.get_reasoning_summary(conn, session_ids=None)
-        finally:
-            conn.close()
+    if not has_filter and (strip_reasoning or strip_tools):
+        any_found = False
 
-        if summary["part_count"] == 0:
-            console.print("[dim]No reasoning parts found.[/]")
+        if strip_reasoning:
+            try:
+                conn = db.connect(readonly=True)
+            except FileNotFoundError as e:
+                click.echo(f"Error: {e}", err=True)
+                raise SystemExit(1) from None
+            try:
+                summary = db.get_reasoning_summary(conn, session_ids=None)
+            finally:
+                conn.close()
+            if summary["part_count"] == 0:
+                console.print("[dim]No reasoning parts found.[/]")
+            else:
+                any_found = True
+                print_reasoning_summary(summary, dry_run=dry_run)
+
+        if strip_tools:
+            try:
+                conn = db.connect(readonly=True)
+            except FileNotFoundError as e:
+                click.echo(f"Error: {e}", err=True)
+                raise SystemExit(1) from None
+            try:
+                summary = db.get_tools_summary(conn, session_ids=None)
+            finally:
+                conn.close()
+            if summary["part_count"] == 0:
+                console.print("[dim]No tool parts found.[/]")
+            else:
+                any_found = True
+                print_tools_summary(summary, dry_run=dry_run)
+
+        if not any_found:
             return
-
-        print_reasoning_summary(summary, dry_run=dry_run)
 
         if dry_run:
             return
 
-        if not force and not click.confirm("Strip all reasoning parts?"):
-            return
+        if strip_reasoning:
+            if not force and not click.confirm("Strip all reasoning parts?"):
+                return
+            conn = db.connect(readonly=False)
+            try:
+                count = db.strip_reasoning(conn, session_ids=None)
+                console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
+            finally:
+                conn.close()
 
-        conn = db.connect(readonly=False)
-        try:
-            count = db.strip_reasoning(conn, session_ids=None)
-            console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
-        finally:
-            conn.close()
+        if strip_tools:
+            if not force and not click.confirm("Strip all tool parts?"):
+                return
+            conn = db.connect(readonly=False)
+            try:
+                count = db.strip_tools(conn, session_ids=None)
+                console.print(f"[green]Deleted {count:,} tool parts.[/]")
+            finally:
+                conn.close()
+
         return
 
     # Get matching session IDs
@@ -122,12 +155,24 @@ def run_purge(
             console.print("[dim]No sessions match the given criteria.[/]")
             return
 
-        if strip_reasoning:
-            summary = db.get_reasoning_summary(conn, matched_ids)
-            if summary["part_count"] == 0:
-                console.print("[dim]No reasoning parts found in matching sessions.[/]")
+        if strip_reasoning or strip_tools:
+            any_found = False
+            if strip_reasoning:
+                r_summary = db.get_reasoning_summary(conn, matched_ids)
+                if r_summary["part_count"] > 0:
+                    print_reasoning_summary(r_summary, dry_run=dry_run)
+                    any_found = True
+                else:
+                    console.print("[dim]No reasoning parts found in matching sessions.[/]")
+            if strip_tools:
+                t_summary = db.get_tools_summary(conn, matched_ids)
+                if t_summary["part_count"] > 0:
+                    print_tools_summary(t_summary, dry_run=dry_run)
+                    any_found = True
+                else:
+                    console.print("[dim]No tool parts found in matching sessions.[/]")
+            if not any_found:
                 return
-            print_reasoning_summary(summary, dry_run=dry_run)
         else:
             summary = db.get_purge_summary(conn, matched_ids)
             # Count session diff files that would be cleaned
@@ -148,7 +193,14 @@ def run_purge(
         return
 
     if not force:
-        action = "Strip reasoning from" if strip_reasoning else "Delete"
+        if strip_reasoning and strip_tools:
+            action = "Strip reasoning and tool parts from"
+        elif strip_reasoning:
+            action = "Strip reasoning from"
+        elif strip_tools:
+            action = "Strip tool parts from"
+        else:
+            action = "Delete"
         if not click.confirm(f"{action} {len(matched_ids)} session(s)?"):
             return
 
@@ -158,9 +210,13 @@ def run_purge(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
-        if strip_reasoning:
-            count = db.strip_reasoning(conn, matched_ids)
-            console.print(f"[green]Deleted {count:,} reasoning parts from {len(matched_ids)} sessions.[/]")
+        if strip_reasoning or strip_tools:
+            if strip_reasoning:
+                count = db.strip_reasoning(conn, matched_ids)
+                console.print(f"[green]Deleted {count:,} reasoning parts from {len(matched_ids)} sessions.[/]")
+            if strip_tools:
+                count = db.strip_tools(conn, matched_ids)
+                console.print(f"[green]Deleted {count:,} tool parts from {len(matched_ids)} sessions.[/]")
         else:
             files_result = db.purge_sessions(conn, matched_ids)
             freed = format_bytes(summary["total_bytes"])

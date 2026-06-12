@@ -329,6 +329,19 @@ def print_reasoning_summary(summary: dict[str, int], dry_run: bool = False) -> N
     console.print(Panel(grid, title=label, border_style=border))
 
 
+def print_tools_summary(summary: dict[str, int], dry_run: bool = False) -> None:
+    label = "[bold yellow]Dry Run — Tool parts to strip[/]" if dry_run else "[bold red]Strip Tools[/]"
+    border = "yellow" if dry_run else "red"
+
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style=C_DIM, justify="right")
+    grid.add_column(style=C_VALUE)
+    grid.add_row("Tool parts", f"{summary['part_count']:,}")
+    grid.add_row("Data size", format_bytes(summary["total_bytes"]))
+
+    console.print(Panel(grid, title=label, border_style=border))
+
+
 def print_vacuum_result(before: int, after: int) -> None:
     saved = before - after
     grid = Table.grid(padding=(0, 2))

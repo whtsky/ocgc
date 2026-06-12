@@ -43,6 +43,7 @@ def analyze() -> None:
 @click.option("--subagents", is_flag=True, default=False, help="Delete subagent sessions (parent_id IS NOT NULL)")
 @click.option("--larger-than", default=None, help="Delete sessions larger than size (e.g., 50M, 1G)")
 @click.option("--strip-reasoning", is_flag=True, default=False, help="Remove reasoning parts only (keeps sessions)")
+@click.option("--strip-tools", is_flag=True, default=False, help="Remove tool-call parts only (keeps sessions)")
 @click.option("--session", "session_ids", multiple=True, help="Delete specific session by ID (repeatable)")
 @click.option("--keep-latest", type=int, default=None, help="Keep N most recent sessions, delete the rest")
 @click.option("--clean-snapshots", is_flag=True, default=False, help="Delete all snapshot directories")
@@ -57,6 +58,7 @@ def purge(
     subagents: bool,
     larger_than: str | None,
     strip_reasoning: bool,
+    strip_tools: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     clean_snapshots: bool,
@@ -74,7 +76,7 @@ def purge(
         has_more = (
             clean_orphans or older_than or subagents
             or larger_than or session_ids
-            or keep_latest is not None or strip_reasoning
+            or keep_latest is not None or strip_reasoning or strip_tools
         )
         if not has_more:
             return
@@ -84,7 +86,7 @@ def purge(
         has_more = (
             older_than or subagents or larger_than
             or session_ids or keep_latest is not None
-            or strip_reasoning
+            or strip_reasoning or strip_tools
         )
         if not has_more:
             return
@@ -94,6 +96,7 @@ def purge(
         subagents=subagents,
         larger_than=larger_than,
         strip_reasoning=strip_reasoning,
+        strip_tools=strip_tools,
         session_ids=session_ids,
         keep_latest=keep_latest,
         dry_run=dry_run,
