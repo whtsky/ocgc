@@ -400,6 +400,25 @@ def purge_sessions(conn: sqlite3.Connection, session_ids: list[str]) -> PurgeFil
     return purge_session_diffs(session_ids)
 
 
+def get_tools_summary(conn: sqlite3.Connection, session_ids: list[str] | None) -> dict[str, int]:
+    if session_ids is not None:
+        if not session_ids:
+            return {"part_count": 0, "total_bytes": 0}
+        placeholders = ",".join("?" for _ in session_ids)
+        row = conn.execute(
+            f"""SELECT COUNT(*), SUM(LENGTH(data)) FROM part
+                WHERE json_extract(data, '$.type') = 'tool'
+                AND session_id IN ({placeholders})""",
+            session_ids,
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """SELECT COUNT(*), SUM(LENGTH(data)) FROM part
+               WHERE json_extract(data, '$.type') = 'tool'"""
+        ).fetchone()
+    return {"part_count": row[0] or 0, "total_bytes": row[1] or 0}
+
+
 def strip_reasoning(conn: sqlite3.Connection, session_ids: list[str] | None = None) -> int:
     """Delete reasoning parts from given sessions (or all). Return count deleted."""
     if session_ids is not None:
@@ -414,6 +433,24 @@ def strip_reasoning(conn: sqlite3.Connection, session_ids: list[str] | None = No
         )
     else:
         cur = conn.execute("DELETE FROM part WHERE json_extract(data, '$.type') = 'reasoning'")
+    conn.commit()
+    return cur.rowcount
+
+
+def strip_tools(conn: sqlite3.Connection, session_ids: list[str] | None = None) -> int:
+    """Delete tool parts from given sessions (or all). Return count deleted."""
+    if session_ids is not None:
+        if not session_ids:
+            return 0
+        placeholders = ",".join("?" for _ in session_ids)
+        cur = conn.execute(
+            f"""DELETE FROM part
+                WHERE json_extract(data, '$.type') = 'tool'
+                AND session_id IN ({placeholders})""",
+            session_ids,
+        )
+    else:
+        cur = conn.execute("DELETE FROM part WHERE json_extract(data, '$.type') = 'tool'")
     conn.commit()
     return cur.rowcount
 

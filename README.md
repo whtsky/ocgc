@@ -59,6 +59,9 @@ ocgc purge --subagents --older-than 7d
 # Strip reasoning tokens only (biggest space win, ~77% of storage)
 ocgc purge --strip-reasoning
 
+# Strip tool-call parts only (keeps sessions, frees space)
+ocgc purge --strip-tools
+
 # Other purge options
 ocgc purge --larger-than 50M
 ocgc purge --keep-latest 50
@@ -74,7 +77,7 @@ ocgc purge --clean-snapshots
 ocgc vacuum
 ```
 
-Multiple purge flags combine with AND. `--strip-reasoning` changes the action from deleting sessions to removing reasoning parts (from matching sessions, or all sessions if no other filters are given). `--clean-orphans` and `--clean-snapshots` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
+Multiple purge flags combine with AND. `--strip-reasoning` and `--strip-tools` change the action from deleting sessions to removing those part types (from matching sessions, or all sessions if no other filters are given). They can be used together to strip both reasoning and tools in one run. `--clean-orphans` and `--clean-snapshots` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
 
 ## Filesystem storage
 
