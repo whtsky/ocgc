@@ -38,6 +38,15 @@ Or with pip:
 pip install ocgc
 ```
 
+### Build a standalone binary
+
+To build a self-contained executable that bundles its dependencies and needs only `python3` at runtime (handy for a synced `~/bin` shared across machines):
+
+```bash
+scripts/build-zipapp.sh               # -> dist/ocgc
+scripts/build-zipapp.sh ~/.bin/ocgc   # build straight into place
+```
+
 ## Usage
 
 ```bash
