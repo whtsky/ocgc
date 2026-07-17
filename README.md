@@ -4,6 +4,8 @@ Analyze and reclaim storage used by [OpenCode](https://github.com/anomalyco/open
 
 OpenCode stores sessions in a SQLite file that grows without limit and has [no built-in cleanup](https://github.com/anomalyco/opencode/issues/4980). It also writes session diffs and git snapshots to disk. `ocgc` shows where the space goes and reclaims it.
 
+Most of that space is usually **not** what you'd expect. The append-only `event` table — full `message.updated` snapshots written on every streaming update — is frequently the single largest consumer, yet it's easy to miss because it isn't part of any session's visible part data. `ocgc` measures it, folds it into each session's real size, and can strip it or clean up the orphaned events that deleted sessions leave behind.
+
 ## Screenshots
 
 `ocgc status`
@@ -56,8 +58,15 @@ ocgc purge --older-than 14d --dry-run
 # Delete subagent sessions older than a week
 ocgc purge --subagents --older-than 7d
 
-# Strip reasoning tokens only (biggest space win, ~77% of storage)
+# Strip reasoning parts only (keeps sessions)
 ocgc purge --strip-reasoning
+
+# Strip the event log only — often the single biggest win
+# (message.updated snapshots, redundant with the message/part tables)
+ocgc purge --strip-events
+
+# Strip events from just the old sessions
+ocgc purge --strip-events --older-than 30d
 
 # Other purge options
 ocgc purge --larger-than 50M
@@ -67,6 +76,9 @@ ocgc purge --session ses_abc123
 # Clean up orphan session diff files (no matching session in DB)
 ocgc purge --clean-orphans
 
+# Clean up orphan event rows left behind by previously-deleted sessions
+ocgc purge --clean-orphan-events
+
 # Delete all snapshot directories
 ocgc purge --clean-snapshots
 
@@ -74,7 +86,9 @@ ocgc purge --clean-snapshots
 ocgc vacuum
 ```
 
-Multiple purge flags combine with AND. `--strip-reasoning` changes the action from deleting sessions to removing reasoning parts (from matching sessions, or all sessions if no other filters are given). `--clean-orphans` and `--clean-snapshots` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
+Multiple purge flags combine with AND. `--strip-reasoning` and `--strip-events` change the action from deleting sessions to removing just those rows (from matching sessions, or all sessions if no other filters are given), and can be combined. `--clean-orphans`, `--clean-orphan-events`, and `--clean-snapshots` run independently before any session purge. `--dry-run` previews without touching anything. `--force` skips the confirmation prompt.
+
+Stripping the event log leaves `event_sequence` intact, so OpenCode keeps appending cleanly to sessions you continue using. Deleting a session (session purge) now also removes its event rows, which upstream ocgc left orphaned — run `--clean-orphan-events` once to sweep up any left over from earlier purges.
 
 ## Filesystem storage
 

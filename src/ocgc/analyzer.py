@@ -21,10 +21,26 @@ def run_status() -> None:
     try:
         root_count, sub_count = db.get_session_count(conn)
         part_stats = db.get_part_type_stats(conn)
+        event_stats = db.get_event_type_stats(conn)
+        _, message_bytes = db.get_message_total(conn)
+        orphan_event_count, orphan_event_bytes = db.get_orphan_event_stats(conn)
+        db_health = db.get_db_health(conn)
         now_ms = int(time.time() * 1000)
         age_dist = db.get_age_distribution(conn, now_ms)
         fs_stats = db.get_filesystem_stats()
-        print_status(db_info, root_count, sub_count, part_stats, age_dist, fs_stats)
+        print_status(
+            db_info,
+            root_count,
+            sub_count,
+            part_stats,
+            event_stats,
+            message_bytes,
+            orphan_event_count,
+            orphan_event_bytes,
+            db_health,
+            age_dist,
+            fs_stats,
+        )
     finally:
         conn.close()
 
@@ -75,11 +91,13 @@ def run_analyze() -> None:
         root_count, sub_count = db.get_session_count(conn)
         total_sessions = root_count + sub_count
         root_stats, sub_stats = db.get_part_type_stats_by_session_type(conn)
-        total_bytes = sum(s.size_bytes for s in root_stats) + sum(s.size_bytes for s in sub_stats)
-        avg_size = total_bytes / total_sessions if total_sessions else 0
+        part_bytes = sum(s.size_bytes for s in root_stats) + sum(s.size_bytes for s in sub_stats)
+        _, event_total_bytes = db.get_event_total(conn)
+        avg_size = (part_bytes + event_total_bytes) / total_sessions if total_sessions else 0
         growth_rate = db.get_growth_rate(conn)
         fs_stats = db.get_filesystem_stats()
         orphans = db.get_orphan_session_diffs(conn)
+        orphan_event_count, orphan_event_bytes = db.get_orphan_event_stats(conn)
         print_analysis(
             top_sessions=top_sessions,
             avg_size=avg_size,
@@ -90,6 +108,9 @@ def run_analyze() -> None:
             fs_stats=fs_stats,
             orphan_count=len(orphans),
             orphan_bytes=sum(o.size for o in orphans),
+            event_total_bytes=event_total_bytes,
+            orphan_event_count=orphan_event_count,
+            orphan_event_bytes=orphan_event_bytes,
         )
     finally:
         conn.close()

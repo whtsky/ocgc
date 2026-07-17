@@ -14,6 +14,8 @@ from ocgc.display import (
     C_VALUE,
     console,
     format_bytes,
+    print_event_strip_summary,
+    print_orphan_events_summary,
     print_purge_summary,
     print_reasoning_summary,
     print_vacuum_result,
@@ -49,6 +51,7 @@ def run_purge(
     subagents: bool,
     larger_than: str | None,
     strip_reasoning: bool,
+    strip_events: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     dry_run: bool,
@@ -59,97 +62,89 @@ def run_purge(
         if not dry_run and not force and not click.confirm("opencode is running. Continue anyway?"):
             return
 
-    has_filter = older_than or subagents or larger_than or session_ids or keep_latest is not None
-    if not has_filter and not strip_reasoning:
+    has_filter = bool(older_than or subagents or larger_than or session_ids or keep_latest is not None)
+    is_strip = strip_reasoning or strip_events
+    if not has_filter and not is_strip:
         console.print("[red]Error:[/] At least one purge flag is required.")
-        console.print("Use --older-than, --subagents, --larger-than, --session, --keep-latest, or --strip-reasoning")
+        console.print(
+            "Use --older-than, --subagents, --larger-than, --session, --keep-latest, "
+            "--strip-reasoning, or --strip-events"
+        )
         raise SystemExit(1)
 
     older_than_ms = parse_duration(older_than) if older_than else None
     larger_than_bytes = parse_size(larger_than) if larger_than else None
     now_ms = int(time.time() * 1000)
 
-    if strip_reasoning and not has_filter:
-        # Strip reasoning from ALL sessions
-        try:
-            conn = db.connect(readonly=True)
-        except FileNotFoundError as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(1) from None
-        try:
-            summary = db.get_reasoning_summary(conn, session_ids=None)
-        finally:
-            conn.close()
+    reasoning_summary: dict[str, int] | None = None
+    event_summary: dict[str, int] | None = None
+    purge_summary: dict[str, int] = {}
+    diff_files = 0
+    diff_bytes = 0
+    target_ids: list[str] | None = None
 
-        if summary["part_count"] == 0:
-            console.print("[dim]No reasoning parts found.[/]")
-            return
-
-        print_reasoning_summary(summary, dry_run=dry_run)
-
-        if dry_run:
-            return
-
-        if not force and not click.confirm("Strip all reasoning parts?"):
-            return
-
-        conn = db.connect(readonly=False)
-        try:
-            count = db.strip_reasoning(conn, session_ids=None)
-            console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
-        finally:
-            conn.close()
-        return
-
-    # Get matching session IDs
     try:
         conn = db.connect(readonly=True)
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
-        matched_ids = db.get_session_ids_for_purge(
-            conn,
-            older_than_ms=older_than_ms,
-            subagents_only=subagents,
-            larger_than_bytes=larger_than_bytes,
-            session_ids=list(session_ids) if session_ids else None,
-            keep_latest=keep_latest,
-            now_ms=now_ms,
-        )
-
-        if not matched_ids:
-            console.print("[dim]No sessions match the given criteria.[/]")
-            return
-
-        if strip_reasoning:
-            summary = db.get_reasoning_summary(conn, matched_ids)
-            if summary["part_count"] == 0:
-                console.print("[dim]No reasoning parts found in matching sessions.[/]")
+        if has_filter:
+            target_ids = db.get_session_ids_for_purge(
+                conn,
+                older_than_ms=older_than_ms,
+                subagents_only=subagents,
+                larger_than_bytes=larger_than_bytes,
+                session_ids=list(session_ids) if session_ids else None,
+                keep_latest=keep_latest,
+                now_ms=now_ms,
+            )
+            if not target_ids:
+                console.print("[dim]No sessions match the given criteria.[/]")
                 return
-            print_reasoning_summary(summary, dry_run=dry_run)
+
+        if is_strip:
+            if strip_reasoning:
+                reasoning_summary = db.get_reasoning_summary(conn, target_ids)
+            if strip_events:
+                event_summary = db.get_event_summary(conn, target_ids)
         else:
-            summary = db.get_purge_summary(conn, matched_ids)
-            # Count session diff files that would be cleaned
+            assert target_ids is not None, "delete mode requires a session filter"
+            purge_summary = db.get_purge_summary(conn, target_ids)
             diff_dir = db.get_storage_dir() / "storage" / "session_diff"
-            diff_files = 0
-            diff_bytes = 0
             if diff_dir.is_dir():
-                for sid in matched_ids:
+                for sid in target_ids:
                     p = diff_dir / f"{sid}.json"
                     if p.exists():
                         diff_files += 1
                         diff_bytes += p.stat().st_size
-            print_purge_summary(summary, dry_run=dry_run, diff_files=diff_files, diff_bytes=diff_bytes)
     finally:
         conn.close()
+
+    if is_strip:
+        has_work = False
+        if reasoning_summary is not None and reasoning_summary["part_count"] > 0:
+            print_reasoning_summary(reasoning_summary, dry_run=dry_run)
+            has_work = True
+        if event_summary is not None and event_summary["event_count"] > 0:
+            print_event_strip_summary(event_summary, dry_run=dry_run)
+            has_work = True
+        if not has_work:
+            console.print("[dim]Nothing to strip in the matching sessions.[/]")
+            return
+    else:
+        print_purge_summary(purge_summary, dry_run=dry_run, diff_files=diff_files, diff_bytes=diff_bytes)
 
     if dry_run:
         return
 
+    scope = "ALL sessions" if target_ids is None else f"{len(target_ids)} session(s)"
     if not force:
-        action = "Strip reasoning from" if strip_reasoning else "Delete"
-        if not click.confirm(f"{action} {len(matched_ids)} session(s)?"):
+        if is_strip:
+            actions = [name for name, on in (("reasoning", strip_reasoning), ("events", strip_events)) if on]
+            if not click.confirm(f"Strip {' + '.join(actions)} from {scope}?"):
+                return
+        elif not click.confirm(f"Delete {scope}?"):
             return
 
     try:
@@ -158,13 +153,17 @@ def run_purge(
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
-        if strip_reasoning:
-            count = db.strip_reasoning(conn, matched_ids)
-            console.print(f"[green]Deleted {count:,} reasoning parts from {len(matched_ids)} sessions.[/]")
+        if is_strip:
+            if strip_reasoning:
+                count = db.strip_reasoning(conn, target_ids)
+                console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
+            if strip_events:
+                count = db.strip_events(conn, target_ids)
+                console.print(f"[green]Deleted {count:,} event rows.[/]")
         else:
-            files_result = db.purge_sessions(conn, matched_ids)
-            freed = format_bytes(summary["total_bytes"])
-            msg = f"[green]Deleted {summary['session_count']:,} sessions, freed ~{freed}."
+            files_result = db.purge_sessions(conn, target_ids or [])
+            freed = format_bytes(purge_summary["total_bytes"])
+            msg = f"[green]Deleted {purge_summary['session_count']:,} sessions, freed ~{freed}."
             if files_result.files_deleted:
                 freed_bytes = format_bytes(files_result.bytes_freed)
                 msg += f" Removed {files_result.files_deleted} session diff file(s) ({freed_bytes})."
@@ -275,3 +274,37 @@ def run_clean_orphans(dry_run: bool, force: bool) -> None:
 
     result = db.purge_orphan_diffs(orphans)
     console.print(f"[green]Deleted {result.files_deleted} orphan file(s), freed {format_bytes(result.bytes_freed)}.[/]")
+
+
+def run_clean_orphan_events(dry_run: bool, force: bool) -> None:
+    try:
+        conn = db.connect(readonly=True)
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    try:
+        count, size_bytes = db.get_orphan_event_stats(conn)
+    finally:
+        conn.close()
+
+    if count == 0:
+        console.print("[dim]No orphan events found.[/]")
+        return
+
+    print_orphan_events_summary(count, size_bytes, dry_run=dry_run)
+
+    if dry_run:
+        return
+
+    if not force and not click.confirm(f"Delete {count:,} orphan event row(s)?"):
+        return
+
+    conn = db.connect(readonly=False)
+    try:
+        result = db.purge_orphan_events(conn)
+    finally:
+        conn.close()
+
+    freed = format_bytes(result["bytes_freed"])
+    console.print(f"[green]Deleted {result['event_count']:,} orphan event(s), freed {freed}.[/]")
+    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
