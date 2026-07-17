@@ -43,12 +43,17 @@ def analyze() -> None:
 @click.option("--subagents", is_flag=True, default=False, help="Delete subagent sessions (parent_id IS NOT NULL)")
 @click.option("--larger-than", default=None, help="Delete sessions larger than size (e.g., 50M, 1G)")
 @click.option("--strip-reasoning", is_flag=True, default=False, help="Remove reasoning parts only (keeps sessions)")
+@click.option("--strip-events", is_flag=True, default=False, help="Remove event-log rows only (keeps sessions)")
 @click.option("--session", "session_ids", multiple=True, help="Delete specific session by ID (repeatable)")
 @click.option("--keep-latest", type=int, default=None, help="Keep N most recent sessions, delete the rest")
 @click.option("--clean-snapshots", is_flag=True, default=False, help="Delete all snapshot directories")
 @click.option(
     "--clean-orphans", is_flag=True, default=False,
     help="Delete orphan session diff files (no matching session)",
+)
+@click.option(
+    "--clean-orphan-events", is_flag=True, default=False,
+    help="Delete event rows whose session no longer exists",
 )
 @click.option("--dry-run", "-n", is_flag=True, default=False, help="Show what would be deleted without doing it")
 @click.option("--force", "-f", is_flag=True, default=False, help="Skip confirmation prompt")
@@ -57,43 +62,49 @@ def purge(
     subagents: bool,
     larger_than: str | None,
     strip_reasoning: bool,
+    strip_events: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     clean_snapshots: bool,
     clean_orphans: bool,
+    clean_orphan_events: bool,
     dry_run: bool,
     force: bool,
 ) -> None:
     """Delete sessions by age, type, size, or ID."""
     if keep_latest is not None and keep_latest < 0:
         raise click.BadParameter("must be a non-negative integer", param_hint="'--keep-latest'")
-    from ocgc.purger import run_clean_orphans, run_clean_snapshots, run_purge
+    from ocgc.purger import (
+        run_clean_orphan_events,
+        run_clean_orphans,
+        run_clean_snapshots,
+        run_purge,
+    )
 
+    ran_cleaner = False
     if clean_snapshots:
         run_clean_snapshots(dry_run=dry_run, force=force)
-        has_more = (
-            clean_orphans or older_than or subagents
-            or larger_than or session_ids
-            or keep_latest is not None or strip_reasoning
-        )
-        if not has_more:
-            return
-
+        ran_cleaner = True
     if clean_orphans:
         run_clean_orphans(dry_run=dry_run, force=force)
-        has_more = (
-            older_than or subagents or larger_than
-            or session_ids or keep_latest is not None
-            or strip_reasoning
-        )
-        if not has_more:
-            return
+        ran_cleaner = True
+    if clean_orphan_events:
+        run_clean_orphan_events(dry_run=dry_run, force=force)
+        ran_cleaner = True
+
+    wants_purge = bool(
+        older_than or subagents or larger_than or session_ids
+        or keep_latest is not None or strip_reasoning or strip_events
+    )
+    if ran_cleaner and not wants_purge:
+        return
 
     run_purge(
         older_than=older_than,
         subagents=subagents,
         larger_than=larger_than,
         strip_reasoning=strip_reasoning,
+        strip_events=strip_events,
         session_ids=session_ids,
         keep_latest=keep_latest,
         dry_run=dry_run,
