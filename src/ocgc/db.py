@@ -816,6 +816,23 @@ def _content_item_summary(conn: sqlite3.Connection, item_type: str, session_ids:
     return {"part_count": count, "total_bytes": size}
 
 
+def _dumps_sqlite_text(data: object) -> str:
+    r"""Serialize JSON to a string sqlite3 can always bind.
+
+    Stored JSON can contain lone-surrogate escapes (JS writes ``\udXXX`` for
+    invalid UTF-8); ``json.loads`` materializes them, and a compact
+    ``ensure_ascii=False`` re-dump keeps them as raw characters that the sqlite3
+    driver cannot UTF-8-encode. Fall back to full ASCII escaping, which stores
+    them as escape sequences again (valid JSON, round-trips via ``json.loads``).
+    """
+    text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        text = json.dumps(data, ensure_ascii=True, separators=(",", ":"))
+    return text
+
+
 def _strip_content_items(conn: sqlite3.Connection, item_type: str, session_ids: list[str] | None) -> int:
     """Remove v1 parts / v2 assistant content items of the given type. Return count removed."""
     if session_ids is not None and not session_ids:
@@ -854,7 +871,7 @@ def _strip_content_items(conn: sqlite3.Connection, item_type: str, session_ids: 
             data["content"] = kept
             conn.execute(
                 "UPDATE session_message SET data = ? WHERE id = ?",
-                (json.dumps(data, ensure_ascii=False, separators=(",", ":")), mid),
+                (_dumps_sqlite_text(data), mid),
             )
     conn.commit()
     return removed
