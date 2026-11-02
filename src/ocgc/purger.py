@@ -14,8 +14,13 @@ from ocgc.display import (
     C_VALUE,
     console,
     format_bytes,
+    print_diff_strip_summary,
+    print_event_strip_summary,
+    print_legacy_summary,
+    print_orphan_events_summary,
     print_purge_summary,
     print_reasoning_summary,
+    print_tools_summary,
     print_vacuum_result,
     warn_if_opencode_running,
     warn_opencode_running,
@@ -49,122 +54,157 @@ def run_purge(
     subagents: bool,
     larger_than: str | None,
     strip_reasoning: bool,
+    strip_tools: bool,
+    strip_events: bool,
+    strip_diffs: bool,
     session_ids: tuple[str, ...],
     keep_latest: int | None,
     dry_run: bool,
     force: bool,
+    legacy: bool = False,
 ) -> None:
+    if legacy:
+        # Restrict every filter/action to the v1 tables. On a migrated v2 DB those are the
+        # stale pre-migration copies; live session_v2 data is never touched.
+        if db.get_schema_override() == "v2":
+            console.print("[red]Error:[/] --legacy targets the v1 tables and cannot be combined with --schema v2.")
+            raise SystemExit(1)
+        db.set_schema_override("v1")
+
     if db.check_opencode_running():
         warn_opencode_running()
         if not dry_run and not force and not click.confirm("opencode is running. Continue anyway?"):
             return
 
-    has_filter = older_than or subagents or larger_than or session_ids or keep_latest is not None
-    if not has_filter and not strip_reasoning:
+    # --legacy alone selects every v1 session (so "--legacy --strip-events" = strip events from all v1 sessions)
+    has_filter = bool(older_than or subagents or larger_than or session_ids or keep_latest is not None or legacy)
+    is_strip = strip_reasoning or strip_tools or strip_events or strip_diffs
+    if not has_filter and not is_strip:
         console.print("[red]Error:[/] At least one purge flag is required.")
-        console.print("Use --older-than, --subagents, --larger-than, --session, --keep-latest, or --strip-reasoning")
+        console.print(
+            "Use --older-than, --subagents, --larger-than, --session, --keep-latest, --legacy, "
+            "--strip-reasoning, --strip-tools, --strip-events, or --strip-diffs"
+        )
         raise SystemExit(1)
 
     older_than_ms = parse_duration(older_than) if older_than else None
     larger_than_bytes = parse_size(larger_than) if larger_than else None
     now_ms = int(time.time() * 1000)
 
-    if strip_reasoning and not has_filter:
-        # Strip reasoning from ALL sessions
-        try:
-            conn = db.connect(readonly=True)
-        except FileNotFoundError as e:
-            click.echo(f"Error: {e}", err=True)
-            raise SystemExit(1) from None
-        try:
-            summary = db.get_reasoning_summary(conn, session_ids=None)
-        finally:
-            conn.close()
+    reasoning_summary: dict[str, int] | None = None
+    tools_summary: dict[str, int] | None = None
+    event_summary: dict[str, int] | None = None
+    diff_summary: dict[str, int] | None = None
+    purge_summary: dict[str, int] = {}
+    diff_files = 0
+    diff_bytes = 0
+    target_ids: list[str] | None = None
 
-        if summary["part_count"] == 0:
-            console.print("[dim]No reasoning parts found.[/]")
-            return
-
-        print_reasoning_summary(summary, dry_run=dry_run)
-
-        if dry_run:
-            return
-
-        if not force and not click.confirm("Strip all reasoning parts?"):
-            return
-
-        conn = db.connect(readonly=False)
-        try:
-            count = db.strip_reasoning(conn, session_ids=None)
-            console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
-        finally:
-            conn.close()
-        return
-
-    # Get matching session IDs
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
-        matched_ids = db.get_session_ids_for_purge(
-            conn,
-            older_than_ms=older_than_ms,
-            subagents_only=subagents,
-            larger_than_bytes=larger_than_bytes,
-            session_ids=list(session_ids) if session_ids else None,
-            keep_latest=keep_latest,
-            now_ms=now_ms,
-        )
-
-        if not matched_ids:
-            console.print("[dim]No sessions match the given criteria.[/]")
-            return
-
-        if strip_reasoning:
-            summary = db.get_reasoning_summary(conn, matched_ids)
-            if summary["part_count"] == 0:
-                console.print("[dim]No reasoning parts found in matching sessions.[/]")
+        if has_filter:
+            target_ids = db.get_session_ids_for_purge(
+                conn,
+                older_than_ms=older_than_ms,
+                subagents_only=subagents,
+                larger_than_bytes=larger_than_bytes,
+                session_ids=list(session_ids) if session_ids else None,
+                keep_latest=keep_latest,
+                now_ms=now_ms,
+            )
+            if not target_ids:
+                console.print("[dim]No sessions match the given criteria.[/]")
                 return
-            print_reasoning_summary(summary, dry_run=dry_run)
+            if legacy:
+                console.print(f"[dim]--legacy: targeting {len(target_ids):,} v1 session(s) in the v1 tables only.[/]")
+
+        if is_strip:
+            if strip_reasoning:
+                reasoning_summary = db.get_reasoning_summary(conn, target_ids)
+            if strip_tools:
+                tools_summary = db.get_tools_summary(conn, target_ids)
+            if strip_events:
+                event_summary = db.get_event_summary(conn, target_ids)
+            if strip_diffs:
+                diff_summary = db.get_diff_summary(conn, target_ids)
         else:
-            summary = db.get_purge_summary(conn, matched_ids)
-            # Count session diff files that would be cleaned
-            diff_dir = db.get_storage_dir() / "storage" / "session_diff"
-            diff_files = 0
-            diff_bytes = 0
-            if diff_dir.is_dir():
-                for sid in matched_ids:
-                    p = diff_dir / f"{sid}.json"
-                    if p.exists():
-                        diff_files += 1
-                        diff_bytes += p.stat().st_size
-            print_purge_summary(summary, dry_run=dry_run, diff_files=diff_files, diff_bytes=diff_bytes)
+            assert target_ids is not None, "delete mode requires a session filter"
+            purge_summary = db.get_purge_summary(conn, target_ids)
+            files = db.get_diff_summary(conn, target_ids)
+            diff_files, diff_bytes = files["file_count"], files["total_bytes"]
     finally:
         conn.close()
+
+    if is_strip:
+        has_work = False
+        if reasoning_summary is not None and reasoning_summary["part_count"] > 0:
+            print_reasoning_summary(reasoning_summary, dry_run=dry_run)
+            has_work = True
+        if tools_summary is not None and tools_summary["part_count"] > 0:
+            print_tools_summary(tools_summary, dry_run=dry_run)
+            has_work = True
+        if event_summary is not None and event_summary["event_count"] > 0:
+            print_event_strip_summary(event_summary, dry_run=dry_run)
+            has_work = True
+        if diff_summary is not None and diff_summary["file_count"] > 0:
+            print_diff_strip_summary(diff_summary, dry_run=dry_run)
+            has_work = True
+        if not has_work:
+            console.print("[dim]Nothing to strip in the matching sessions.[/]")
+            return
+    else:
+        print_purge_summary(purge_summary, dry_run=dry_run, diff_files=diff_files, diff_bytes=diff_bytes)
 
     if dry_run:
         return
 
+    kind = "v1 " if legacy else ""
+    scope = "ALL sessions" if target_ids is None else f"{len(target_ids)} {kind}session(s)"
     if not force:
-        action = "Strip reasoning from" if strip_reasoning else "Delete"
-        if not click.confirm(f"{action} {len(matched_ids)} session(s)?"):
+        if is_strip:
+            actions = [
+                name
+                for name, on in (
+                    ("reasoning", strip_reasoning),
+                    ("tools", strip_tools),
+                    ("events", strip_events),
+                    ("session diffs", strip_diffs),
+                )
+                if on
+            ]
+            if not click.confirm(f"Strip {' + '.join(actions)} from {scope}?"):
+                return
+        elif not click.confirm(f"Delete {scope}?"):
             return
 
     try:
         conn = db.connect(readonly=False)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
-        if strip_reasoning:
-            count = db.strip_reasoning(conn, matched_ids)
-            console.print(f"[green]Deleted {count:,} reasoning parts from {len(matched_ids)} sessions.[/]")
+        if is_strip:
+            if strip_reasoning:
+                count = db.strip_reasoning(conn, target_ids)
+                console.print(f"[green]Deleted {count:,} reasoning parts.[/]")
+            if strip_tools:
+                count = db.strip_tools(conn, target_ids)
+                console.print(f"[green]Deleted {count:,} tool parts.[/]")
+            if strip_events:
+                count = db.strip_events(conn, target_ids)
+                console.print(f"[green]Deleted {count:,} event rows.[/]")
+            if strip_diffs:
+                result = db.strip_diffs(conn, target_ids)
+                freed = format_bytes(result.bytes_freed)
+                console.print(f"[green]Deleted {result.files_deleted:,} session diff file(s), freed {freed}.[/]")
         else:
-            files_result = db.purge_sessions(conn, matched_ids)
-            freed = format_bytes(summary["total_bytes"])
-            msg = f"[green]Deleted {summary['session_count']:,} sessions, freed ~{freed}."
+            files_result = db.purge_sessions(conn, target_ids or [])
+            freed = format_bytes(purge_summary["total_bytes"])
+            msg = f"[green]Deleted {purge_summary['session_count']:,} sessions, freed ~{freed}."
             if files_result.files_deleted:
                 freed_bytes = format_bytes(files_result.bytes_freed)
                 msg += f" Removed {files_result.files_deleted} session diff file(s) ({freed_bytes})."
@@ -173,7 +213,9 @@ def run_purge(
     finally:
         conn.close()
 
-    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
+    # diff files are freed immediately; only DB row deletes need a VACUUM
+    if not is_strip or strip_reasoning or strip_tools or strip_events:
+        console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
 
 
 def run_vacuum(force: bool = False) -> None:
@@ -195,6 +237,9 @@ def run_vacuum(force: bool = False) -> None:
     with console.status("[bold cyan]Running VACUUM...[/]"):
         try:
             before, after = db.vacuum_db()
+        except db.SchemaError as e:
+            console.print(f"[red]Error:[/] {e}")
+            raise SystemExit(1) from None
         except sqlite3.OperationalError as e:
             err_msg = str(e).lower()
             if "locked" in err_msg or "busy" in err_msg:
@@ -243,7 +288,7 @@ def run_clean_snapshots(dry_run: bool, force: bool) -> None:
 def run_clean_orphans(dry_run: bool, force: bool) -> None:
     try:
         conn = db.connect(readonly=True)
-    except FileNotFoundError as e:
+    except (FileNotFoundError, db.SchemaError) as e:
         click.echo(f"Error: {e}", err=True)
         raise SystemExit(1) from None
     try:
@@ -275,3 +320,89 @@ def run_clean_orphans(dry_run: bool, force: bool) -> None:
 
     result = db.purge_orphan_diffs(orphans)
     console.print(f"[green]Deleted {result.files_deleted} orphan file(s), freed {format_bytes(result.bytes_freed)}.[/]")
+
+
+def run_clean_orphan_events(dry_run: bool, force: bool) -> None:
+    try:
+        conn = db.connect(readonly=True)
+    except (FileNotFoundError, db.SchemaError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    try:
+        count, size_bytes = db.get_orphan_event_stats(conn)
+    finally:
+        conn.close()
+
+    if count == 0:
+        console.print("[dim]No orphan events found.[/]")
+        return
+
+    print_orphan_events_summary(count, size_bytes, dry_run=dry_run)
+
+    if dry_run:
+        return
+
+    if not force and not click.confirm(f"Delete {count:,} orphan event row(s)?"):
+        return
+
+    conn = db.connect(readonly=False)
+    try:
+        result = db.purge_orphan_events(conn)
+    finally:
+        conn.close()
+
+    freed = format_bytes(result["bytes_freed"])
+    console.print(f"[green]Deleted {result['event_count']:,} orphan event(s), freed {freed}.[/]")
+    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
+
+
+def run_clean_legacy(dry_run: bool, force: bool) -> None:
+    """Empty the stale v1 tables left behind by opencode 2.x's v1->v2 migration."""
+    try:
+        conn = db.connect(readonly=True)
+    except (FileNotFoundError, db.SchemaError) as e:
+        click.echo(f"Error: {e}", err=True)
+        raise SystemExit(1) from None
+    try:
+        schema = db.get_schema(conn)
+        stats = db.get_legacy_stats(conn)
+    finally:
+        conn.close()
+
+    if stats is None:
+        if schema.has_v1 and schema.has_v2:
+            console.print(
+                "[yellow]v1 tables still hold unmigrated sessions[/] (the v1->v2 migration has not completed). "
+                "Start opencode 2.x to finish migrating before cleaning them."
+            )
+        else:
+            console.print("[dim]No stale v1 data found.[/]")
+        return
+    if stats["session_count"] == 0 and stats["total_bytes"] == 0:
+        console.print("[dim]No stale v1 data found.[/]")
+        return
+
+    print_legacy_summary(stats, dry_run=dry_run)
+
+    if dry_run:
+        return
+
+    if db.check_opencode_running():
+        warn_opencode_running()
+    if not force:
+        console.print(
+            "[yellow]Warning:[/] opencode 2.x has already copied these sessions into session_v2 and no longer "
+            "reads them, but downgrading to opencode 1.x afterwards will show no history."
+        )
+        if not click.confirm(f"Delete {stats['session_count']:,} stale v1 session(s) and their messages/parts?"):
+            return
+
+    conn = db.connect(readonly=False)
+    try:
+        with console.status("[bold cyan]Deleting stale v1 rows...[/]"):
+            db.purge_legacy(conn)
+    finally:
+        conn.close()
+
+    console.print(f"[green]Deleted stale v1 data, freed ~{format_bytes(stats['total_bytes'])}.[/]")
+    console.print("[dim]Run 'ocgc vacuum' to reclaim disk space.[/]")
